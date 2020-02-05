@@ -1,0 +1,100 @@
+Spark Performance Tuning
+Memory Tuning
+Consider the following three things in tuning memory usage:
+· Amount of memory used by objects (the entire dataset should fit in-memory)
+· The cost of accessing those objects
+· Overhead of garbage collection.
+Dynamic Allocation (of Executors)
+Dynamic Allocation (of Executors) (aka Elastic Scaling) is a Spark feature that allows for adding or removing Spark executors dynamically to match the workload.
+Unlike the "traditional" static allocation where a Spark application reserves CPU and memory resources upfront (irrespective of how much it may eventually use), in dynamic allocation you get as much as needed and no more. It scales the number of executors up and down based on workload, i.e. idle executors are removed, and when there are pending tasks waiting for executors to be launched on, dynamic allocation requests them.
+ 
+Broadcasting Large Variables
+The size of each serialized task reduces by using broadcast functionality in SparkContext. If a task uses a large object from driver program inside of them, turn it into the broadcast variable. 
+ 
+
+Avoid GroupByKey use reduceByKey
+ü Here are more functions to prefer over groupByKey:
+ü combineByKey can be used when you are combining elements but your return type differs from your input value type.
+	· foldByKey merges the values for each key using an associative function and a neutral "zero value".
+	· 
+
+
+Use lookup function rather than left join
+Use memoryanddiskserialization when persist.
+Don't copy all elements of a large RDD to the driver
+ü If your RDD is so large that all of it's elements won't fit in memory on the drive machine, don't do this:
+ü val values = myVeryLargeRDD.collect()
+ü Collect will attempt to copy every single element in the RDD onto the single driver program, and then run out of memory and crash.
+ü Instead, you can make sure the number of elements you return is capped by calling take or takeSample, or perhaps filtering or sampling your RDD.
+ 
+Gracefully Dealing with Bad Input Data
+ü Handle exception handling, rdd.isempty check, count the number of elements in the array, use dataset for typesafe.
+Data Locality
+Spark is a data parallel processing framework, which means it will execute tasks as close to where the data lives as possible (i.e. minimize data transfer).
+Data Serialization (Kyro/Tungsten)
+It is the process of converting the in-memory object to another format that can be used to store in a file or send over the network. It plays a distinctive role in the performance of any distributed application. The computation gets slower due to formats that are slow to serialize or consume a large number of files. Apache Spark gives serialization libraries:
+conf.set(“spark.serializer”, “org.apache.spark.serializer.KyroSerializer”)
+Straggler Tasks (Long Running Tasks) 
+The straggler tasks can be identified in the Stages view and take a long time to complete. In this use case, the following are the straggler tasks that took longer time.
+RDD Implementation Straggler Task
+
+DataFrame Implementation Straggler Task
+
+ 
+Use Dataframes/Datasets as much as possible
+Apache Spark 2.x version ships with the second-generation Tungsten engine. This engine is built upon ideas from modern compilers to emit optimized code at runtime that collapses the entire query into a single function by using “whole-stage code generation” technique. Thereby, eliminating virtual function calls and leveraging CPU registers for intermediate data. This optimization is applied only to Spark high-level APIs such as DataFrame and Dataset and not to low-level RDD API.
+ü Dataset API gains the advantage of Spark’s optimizers such as Catalyst and Tungsten.
+ü Datasets acquire two discrete APIs characteristics such as strongly typed and untyped.
+Let us first decide the number of partitions based on the input dataset size. The rule of thumb to decide the partition size while working with HDFS is 128 MB. As our input dataset size is about 1.5 GB (1500 MB) and going with 128 MB per partition, the number of partitions will be:
+Total input dataset size / partition size => 1500 / 128 = 11.71 = ~12 partitions.
+ 
+Checking Locality
+The best means of checking whether a task ran locally is to inspect a given stage in the Spark UI. Notice from the screenshot below that the "Locality Level" column displays which locality a given task ran with.
+
+ 
+ 
+ 
+Spark Memory Allocation
+ let’s consider a 10 node cluster with following config and analyse different possibilities of executors-core-memory distribution:
+**Cluster Config:**
+10 Nodes
+16 cores per Node
+64GB RAM per Node
+ 
+First Approach: Tiny executors [One Executor per core]:
+Analysis: With only one executor per core, as we discussed above, we’ll not be able to take advantage of running multiple tasks in the same JVM. Also, shared/cached variables like broadcast variables and accumulators will be replicated in each core of the nodes which is 16 times. Also, we are not leaving enough memory overhead for Hadoop/Yarn daemon processes and we are not counting in ApplicationManager. NOT GOOD!
+Second Approach: Fat executors (One Executor per node):
+Analysis: With all 16 cores per executor, apart from ApplicationManager and daemon processes are not counted for, HDFS throughput will hurt and it’ll result in excessive garbage results. Also,NOT GOOD!
+ 
+Third Approach: Balance between Fat (vs) Tiny
+ 
+·  Let’s assign 5 core per executors => --executor-cores = 5 (for good HDFS throughput)
+· Leave 1 core per node for Hadoop/Yarn daemons => Num cores available per node = 16-1 = 15
+· So, Total available of cores in cluster = 15 x 10 = 150
+· Number of available executors = (total cores/num-cores-per-executor) = 150/5 = 30
+· Leaving 1 executor for ApplicationManager => --num-executors = 29
+· Number of executors per node = 30/10 = 3
+· Memory per executor = 64GB/3 = 21GB
+· Counting off heap overhead = 7% of 21GB = 3GB. So, actual --executor-memory = 21 - 3 = 18GB
+So, recommended config is: 29 executors, 18GB memory each and 5 cores each!!
+Analysis: It is obvious as to how this third approach has found right balance between Fat vs Tiny approaches. Needless to say, it achieved parallelism of a fat executor and best throughputs of a tiny executor!!
+ 
+So, recommended config is: 29 executors, 18GB memory each and 5 cores each!!
+Analysis: It is obvious as to how this third approach has found right balance between Fat vs Tiny approaches. Needless to say, it achieved parallelism of a fat executor and best throughputs of a tiny executor!!
+Conclusion:
+We’ve seen:
+· Couple of recommendations to keep in mind which configuring these params for a spark-application like:
+	· Budget in the resources that Yarn’s Application Manager would need
+	· How we should spare some cores for Hadoop/Yarn/OS deamon processes
+	· Learnt about spark-yarn-memory-usage
+· Also, checked out and analysed three different approaches to configure these params:
+	1. Tiny Executors - One Executor per Core
+	2. Fat Executors - One executor per Node
+	3. Recommended approach - Right balance between Tiny (Vs) Fat coupled with the recommendations.
+--num-executors, --executor-cores and --executor-memory.. these three params play a very important role in spark performance as they control the amount of CPU & memory your spark application gets. This makes it very crucial for users to understand the right way to configure them. Hope this blog helped you in getting that perspective…
+ 
+Spark Turning by playing with Storage/Memory fraction:
+https://aws.amazon.com/blogs/big-data/best-practices-for-successfully-managing-memory-for-apache-spark-applications-on-amazon-emr/
+
+
+
